@@ -1,3 +1,33 @@
+[project]
+name = "mint"
+version = "0.1.0"
+description = "Learning the language of protein-protein interactions"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "numpy",
+    "click",
+    "tqdm",
+    "mosaicml-streaming>=0.12",
+    "biopython",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pixi.project]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+requires-pixi = ">=0.52.0"
+
+[tool.pixi.dependencies]
+python = ">=3.10,<3.13"
+
+[tool.pixi.pypi-dependencies]
+torch = { version = ">=2.0.0,<3", index = "https://download.pytorch.org/whl/cu121" }
+mint = { path = ".", editable = true }
+
 [tool.black]
 line-length = 99
 exclude = '''

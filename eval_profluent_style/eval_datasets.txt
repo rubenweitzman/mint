@@ -1,0 +1,18 @@
+# 1. alignment_skempi (7,049 samples)
+alignment_skempi: "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_skempi"
+# 2. alignment_mutational_ppi (9,248 samples)
+alignment_mutational_ppi: "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_mutational_ppi"
+# 3. alignment_yeast_ppi_combined (10,868 samples)
+alignment_yeast_ppi_combined: "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_yeast_ppi_combined"
+# 4. alignment_human_ppi_combined (53,466 samples)
+alignment_human_ppi_combined: "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_human_ppi_combined"
+# 5. alignment_intact_ppi (93,919 samples)
+alignment_intact_ppi: "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_intact_ppi"
+# 6. validation_high_score_20_species (375,858 samples)
+validation_high_score_20_species: "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/validation_high_score_20_species"
+# 7. alignment_bindinggym_combined (508,962 samples)
+alignment_bindinggym_combined: "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_bindinggym_combined"
+# 8. alignment_gold_combined (548,654 samples)
+alignment_gold_combined: "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_gold_combined"
+# 9. human_validation_with_negatives (2,138,006 samples)
+human_validation_with_negatives: "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/human_validation_with_negatives"
