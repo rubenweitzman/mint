@@ -70,8 +70,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Dataset paths from dataset_to_eval.md
-DATASET_PATHS = {
+# Dataset paths - supports both MDS and CSV formats
+# MDS paths (streaming format)
+DATASET_PATHS_MDS = {
     "alignment_skempi": "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_skempi",
     "alignment_mutational_ppi": "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_mutational_ppi",
     "alignment_yeast_ppi_combined": "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_yeast_ppi_combined",
@@ -82,6 +83,59 @@ DATASET_PATHS = {
     "alignment_gold_combined": "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/alignment_gold_combined",
     "human_validation_with_negatives": "gs://profluent-rweitzman/alignment/test_dataset_mds_round_2/human_validation_with_negatives",
 }
+
+# CSV paths (direct CSV format) - for datasets without MDS
+DATASET_PATHS_CSV = {
+    "alignment_intact_covid": "gs://profluent-rweitzman/alignment/test_dataset_csv_round_2/alignment_intact_covid.csv",
+    "alignment_virus_human": "gs://profluent-rweitzman/alignment/test_dataset_csv_round_2/alignment_virus_human.csv",
+}
+
+# Combined lookup (prefer MDS, fallback to CSV)
+DATASET_PATHS = {**DATASET_PATHS_MDS, **DATASET_PATHS_CSV}
+
+
+def load_csv_dataset(csv_path: str, max_samples: Optional[int] = None) -> Tuple[pd.DataFrame, List[Dict]]:
+    """
+    Load CSV dataset from GCS or local path.
+    
+    Args:
+        csv_path: GCS path or local path to CSV file
+        max_samples: Maximum number of samples to load (None for all)
+    
+    Returns:
+        Tuple of (original DataFrame, list of sample dicts)
+    """
+    logger.info(f"Loading CSV dataset from: {csv_path}")
+    
+    # Download from GCS if needed
+    if csv_path.startswith("gs://"):
+        local_csv = tempfile.NamedTemporaryFile(suffix=".csv", delete=False).name
+        logger.info(f"Downloading to: {local_csv}")
+        cmd = f"gcloud storage cp {shlex.quote(csv_path)} {shlex.quote(local_csv)}"
+        subprocess.run(shlex.split(cmd), check=True)
+        csv_path = local_csv
+    
+    # Load CSV
+    df = pd.read_csv(csv_path)
+    logger.info(f"CSV contains {len(df)} rows")
+    logger.info(f"Columns: {list(df.columns)}")
+    
+    # Apply max_samples limit
+    if max_samples and max_samples < len(df):
+        df = df.head(max_samples)
+        logger.info(f"Limited to {max_samples} samples")
+    
+    # Convert to sample list (same format as MDS)
+    samples = []
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="Loading samples", unit="samples"):
+        samples.append({
+            'sequence': row.get('sequence', ''),
+            'value': float(row.get('value', 0.0)),
+            'data_source': row.get('data_source', 'default')
+        })
+    
+    logger.info(f"Loaded {len(samples)} samples")
+    return df, samples
 
 
 def load_mds_dataset(gcs_path: str, max_samples: Optional[int] = None, local_cache_dir: Optional[str] = None) -> List[Dict]:
@@ -314,6 +368,11 @@ def run_ppi_prediction(
     help="GCS path to MDS dataset (overrides dataset-name if provided)"
 )
 @click.option(
+    "--csv-path",
+    type=str,
+    help="GCS or local path to CSV file (format: sequence,value,data_source). Overrides --gcs-path"
+)
+@click.option(
     "--checkpoint-path",
     type=str,
     required=True,
@@ -374,6 +433,7 @@ def run_ppi_prediction(
 def main(
     dataset_name: Optional[str],
     gcs_path: Optional[str],
+    csv_path: Optional[str],
     checkpoint_path: str,
     config_path: str,
     output_dir: str,
@@ -385,22 +445,34 @@ def main(
     compute_supervised: bool,
     sep_chains: bool,
 ) -> None:
-    """Run MINT PPI prediction evaluation on MDS dataset."""
+    """Run MINT PPI prediction evaluation on MDS or CSV dataset."""
     
-    # Determine GCS path
-    if gcs_path:
-        dataset_gcs_path = gcs_path
+    # Determine data source (CSV takes priority, then MDS)
+    use_csv = False
+    original_df = None
+    
+    if csv_path:
+        # Direct CSV path provided
+        data_path = csv_path
+        use_csv = True
+    elif gcs_path:
+        # Direct GCS path to MDS
+        data_path = gcs_path
+        use_csv = gcs_path.endswith('.csv')
     elif dataset_name and dataset_name in DATASET_PATHS:
-        dataset_gcs_path = DATASET_PATHS[dataset_name]
+        data_path = DATASET_PATHS[dataset_name]
+        # Check if this dataset is CSV format
+        use_csv = dataset_name in DATASET_PATHS_CSV or data_path.endswith('.csv')
     else:
-        logger.error(f"Must provide either --gcs-path or --dataset-name (one of: {list(DATASET_PATHS.keys())})")
+        logger.error(f"Must provide --csv-path, --gcs-path, or --dataset-name (one of: {list(DATASET_PATHS.keys())})")
         sys.exit(1)
     
     logger.info("="*80)
     logger.info("MINT PPI Prediction Evaluation")
     logger.info("="*80)
     logger.info(f"Dataset: {dataset_name or 'custom'}")
-    logger.info(f"GCS Path: {dataset_gcs_path}")
+    logger.info(f"Data Path: {data_path}")
+    logger.info(f"Format: {'CSV' if use_csv else 'MDS'}")
     logger.info(f"Checkpoint: {checkpoint_path}")
     logger.info(f"Config: {config_path}")
     logger.info(f"Output Directory: {output_dir}")
@@ -409,9 +481,13 @@ def main(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Step 1: Load MDS dataset
-    logger.info("\n[Step 1/4] Loading MDS dataset...")
-    samples = load_mds_dataset(dataset_gcs_path, max_samples=max_samples)
+    # Step 1: Load dataset (CSV or MDS)
+    if use_csv:
+        logger.info("\n[Step 1/4] Loading CSV dataset...")
+        original_df, samples = load_csv_dataset(data_path, max_samples=max_samples)
+    else:
+        logger.info("\n[Step 1/4] Loading MDS dataset...")
+        samples = load_mds_dataset(data_path, max_samples=max_samples)
     
     # Step 2: Extract protein pairs
     logger.info("\n[Step 2/4] Extracting protein pairs...")
@@ -449,41 +525,63 @@ def main(
     # Supervised predictions are only computed if flag is set
     supervised_predictions = results['supervised_predictions']
     
-    # Build output rows preserving original structure
-    output_rows = []
-    for i, sample in enumerate(tqdm(samples, desc="Creating output", unit="samples")):
-        # Unsupervised score (always present)
-        if i < len(unsupervised_scores):
-            unsupervised_score = float(unsupervised_scores[i])
+    # If we loaded from CSV, add columns to original DataFrame
+    if use_csv and original_df is not None:
+        logger.info("Adding prediction columns to original CSV...")
+        output_df = original_df.copy()
+        
+        # Add unsupervised scores
+        if len(unsupervised_scores) == len(output_df):
+            output_df['mint_unsupervised'] = unsupervised_scores
         else:
-            logger.warning(f"Could not find unsupervised score for sample {i}")
-            unsupervised_score = np.nan
+            logger.warning(f"Score count mismatch: {len(unsupervised_scores)} vs {len(output_df)} rows")
+            output_df['mint_unsupervised'] = np.nan
+            output_df.loc[:len(unsupervised_scores)-1, 'mint_unsupervised'] = unsupervised_scores
         
-        # Supervised prediction (only if computed)
-        supervised_prediction = None
+        # Add supervised predictions if computed
         if supervised_predictions is not None:
-            if i < len(supervised_predictions):
-                supervised_prediction = float(supervised_predictions[i])
+            if len(supervised_predictions) == len(output_df):
+                output_df['mint_supervised'] = supervised_predictions
             else:
-                logger.warning(f"Could not find supervised prediction for sample {i}")
-                supervised_prediction = np.nan
+                output_df['mint_supervised'] = np.nan
+                output_df.loc[:len(supervised_predictions)-1, 'mint_supervised'] = supervised_predictions
+    else:
+        # Build output rows from samples (MDS format)
+        output_rows = []
+        for i, sample in enumerate(tqdm(samples, desc="Creating output", unit="samples")):
+            # Unsupervised score (always present)
+            if i < len(unsupervised_scores):
+                unsupervised_score = float(unsupervised_scores[i])
+            else:
+                logger.warning(f"Could not find unsupervised score for sample {i}")
+                unsupervised_score = np.nan
+            
+            # Supervised prediction (only if computed)
+            supervised_prediction = None
+            if supervised_predictions is not None:
+                if i < len(supervised_predictions):
+                    supervised_prediction = float(supervised_predictions[i])
+                else:
+                    logger.warning(f"Could not find supervised prediction for sample {i}")
+                    supervised_prediction = np.nan
+            
+            # Preserve original structure and add scores
+            row = {
+                'data_source': sample.get('data_source', ''),
+                'sequence': sample['sequence'],
+                'value': sample['value'],
+                'mint_unsupervised': unsupervised_score,
+            }
+            
+            # Add supervised prediction if computed
+            if supervised_prediction is not None:
+                row['mint_supervised'] = supervised_prediction
+            
+            output_rows.append(row)
         
-        # Preserve original structure and add scores
-        row = {
-            'data_source': sample.get('data_source', ''),
-            'sequence': sample['sequence'],
-            'value': sample['value'],
-            'unsupervised_score': unsupervised_score,
-        }
-        
-        # Add supervised prediction if computed
-        if supervised_prediction is not None:
-            row['supervised_prediction'] = supervised_prediction
-        
-        output_rows.append(row)
+        output_df = pd.DataFrame(output_rows)
     
-    # Create DataFrame and save to CSV
-    output_df = pd.DataFrame(output_rows)
+    # Save to CSV
     csv_output_file = output_path / "results.csv"
     output_df.to_csv(csv_output_file, index=False)
     logger.info(f"Saved CSV results to {csv_output_file}")
@@ -495,7 +593,7 @@ def main(
     
     # Add metadata to results
     results['dataset_name'] = dataset_name or 'custom'
-    results['dataset_gcs_path'] = dataset_gcs_path
+    results['data_path'] = data_path
     results['num_samples'] = len(samples)
     results['num_pairs'] = len(pairs)
     
@@ -510,12 +608,12 @@ def main(
     logger.info(f"Total pairs: {len(pairs)}")
     
     # Log unsupervised scores (always computed)
-    if 'unsupervised_score' in output_df.columns and not np.isnan(output_df['unsupervised_score']).all():
-        logger.info(f"Unsupervised score range: {output_df['unsupervised_score'].min():.4f} - {output_df['unsupervised_score'].max():.4f}")
+    if 'mint_unsupervised' in output_df.columns and not output_df['mint_unsupervised'].isna().all():
+        logger.info(f"MINT unsupervised score range: {output_df['mint_unsupervised'].min():.4f} - {output_df['mint_unsupervised'].max():.4f}")
     
     # Log supervised predictions (only if computed)
-    if 'supervised_prediction' in output_df.columns and not np.isnan(output_df['supervised_prediction']).all():
-        logger.info(f"Supervised prediction range: {output_df['supervised_prediction'].min():.4f} - {output_df['supervised_prediction'].max():.4f}")
+    if 'mint_supervised' in output_df.columns and not output_df['mint_supervised'].isna().all():
+        logger.info(f"MINT supervised prediction range: {output_df['mint_supervised'].min():.4f} - {output_df['mint_supervised'].max():.4f}")
     
     logger.info(f"CSV results saved to: {csv_output_file}")
     logger.info(f"Detailed results saved to: {results_file}")
